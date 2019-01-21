@@ -22,7 +22,6 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
@@ -34,29 +33,6 @@ import (
 
 	"github.com/rabadin/gocov/gocov/internal/testflag"
 )
-
-// resolvePackages returns a slice of resolved package names, given a slice of
-// package names that could be relative or recursive.
-func resolvePackages(pkgs []string) ([]string, error) {
-	var buf bytes.Buffer
-	cmd := exec.Command("go", append([]string{"list", "-e"}, pkgs...)...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = &buf
-	cmd.Stderr = os.Stderr
-	err := cmd.Run()
-	if err != nil {
-		return nil, err
-	}
-	var resolvedPkgs []string
-	lines := strings.Split(buf.String(), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if len(line) > 0 {
-			resolvedPkgs = append(resolvedPkgs, line)
-		}
-	}
-	return resolvedPkgs, nil
-}
 
 // createMissingTestFiles creates test files for all go files without tests.
 // This is to work around https://github.com/axw/gocov/issues/81 and
@@ -119,14 +95,10 @@ func deleteCreateTestFiles(files []string) error {
 
 func runTests(args []string) error {
 	pkgs, testFlags := testflag.Split(args)
-	newFiles, err2 := createMissingTestFiles(pkgs)
+	newFiles, err := createMissingTestFiles(pkgs)
 	defer func() {
 		deleteCreateTestFiles(newFiles)
 	}()
-	if err2 != nil {
-		return err2
-	}
-	pkgs, err := resolvePackages(pkgs)
 	if err != nil {
 		return err
 	}
@@ -142,27 +114,23 @@ func runTests(args []string) error {
 		}
 	}()
 
-	// Unique -coverprofile file names are used so that all the files can be
-	// later merged into a single file.
-	for i, pkg := range pkgs {
-		coverFile := filepath.Join(tmpDir, fmt.Sprintf("test%d.cov", i))
-		cmdArgs := append([]string{"test", "-coverprofile", coverFile}, testFlags...)
+	coverFile := filepath.Join(tmpDir, "cover.cov")
+	cmdArgs := append([]string{"test", "-coverprofile", coverFile}, testFlags...)
+	for _, pkg := range pkgs {
 		cmdArgs = append(cmdArgs, pkg)
-		cmd := exec.Command("go", cmdArgs...)
-		cmd.Stdin = nil
-		// Write all test command output to stderr so as not to interfere with
-		// the JSON coverage output.
-		cmd.Stdout = os.Stderr
-		cmd.Stderr = os.Stderr
-		err := cmd.Run()
-		if err != nil {
-			return err
-		}
+	}
+	cmd := exec.Command("go", cmdArgs...)
+	cmd.Stdin = nil
+	// Write all test command output to stderr so as not to interfere with
+	// the JSON coverage output.
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	err = cmd.Run()
+	if err != nil {
+		return err
 	}
 
-	// Packages without tests will not produce a coverprofile; only pick up the
-	// ones that were created.
-	files, err := filepath.Glob(filepath.Join(tmpDir, "test*.cov"))
+	files, err := filepath.Glob(filepath.Join(tmpDir, "cover.cov"))
 	if err != nil {
 		return err
 	}
