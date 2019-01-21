@@ -27,10 +27,12 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 
-	"github.com/axw/gocov/gocov/internal/testflag"
+	"github.com/rabadin/gocov/gocov/internal/testflag"
 )
 
 // resolvePackages returns a slice of resolved package names, given a slice of
@@ -56,8 +58,74 @@ func resolvePackages(pkgs []string) ([]string, error) {
 	return resolvedPkgs, nil
 }
 
+// createMissingTestFiles creates test files for all go files without tests.
+// This is to work around https://github.com/axw/gocov/issues/81 and
+// https://github.com/golang/go/issues/24570.
+func createMissingTestFiles(pkgs []string) ([]string, error) {
+	var buf bytes.Buffer
+
+	cmd := exec.Command("go", append([]string{"list", "-f", "{{.Dir}} {{.Name}} {{.GoFiles}}"}, pkgs...)...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = &buf
+	cmd.Stderr = os.Stderr
+	err := cmd.Run()
+	if err != nil {
+		return nil, err
+	}
+	matcher := regexp.MustCompile(`(\S+) (.*) \[(.*)\]`)
+	var createdFiles []string
+	lines := strings.Split(buf.String(), "\n")
+	for _, line := range lines {
+		matches := matcher.FindStringSubmatch(line)
+		if len(matches) < 4 {
+			continue
+		}
+		packagePath := matches[1]
+		packageName := matches[2]
+		goFiles := matches[3]
+
+		// Create empty files.
+		for _, goFile := range strings.Split(goFiles, " ") {
+			testFile := strings.TrimSuffix(goFile, ".go") + "_test.go"
+			testFilePath := path.Join(packagePath, testFile)
+			newFile, err := os.OpenFile(testFilePath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
+			if err != nil && !os.IsExist(err) {
+				return nil, err
+			} else if os.IsExist(err) {
+				continue
+			}
+
+			if _, err := newFile.Write([]byte("package " + packageName + "\n")); err != nil {
+				return nil, err
+			}
+			if err := newFile.Close(); err != nil {
+				return nil, err
+			}
+			createdFiles = append(createdFiles, testFilePath)
+		}
+	}
+	return createdFiles, nil
+}
+
+func deleteCreateTestFiles(files []string) error {
+	for _, toDeleteFile := range files {
+		var err = os.Remove(toDeleteFile)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func runTests(args []string) error {
 	pkgs, testFlags := testflag.Split(args)
+	newFiles, err2 := createMissingTestFiles(pkgs)
+	defer func() {
+		deleteCreateTestFiles(newFiles)
+	}()
+	if err2 != nil {
+		return err2
+	}
 	pkgs, err := resolvePackages(pkgs)
 	if err != nil {
 		return err
